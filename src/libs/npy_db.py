@@ -7,12 +7,14 @@ logger = logging.getLogger()
 import re
 import chess.pgn
 import io
+from libs.engine import Stockfish
 
 class NpyDb:
 
-    def __init__(self, db_path ="", db_name = "games.npy", max_games = 1000000):
+    def __init__(self, db_path ="", db_name = "games.npy", max_games = 1000000, engine_path = "/usr/local/bin/stockfish"):
         self.db_path = os.path.join(db_path, db_name)
         self.max_games = max_games
+        self.engine_path = engine_path
         logger.debug(f'Lichess Database Object {db_name} created')
 
     def __str__(self):
@@ -20,14 +22,64 @@ class NpyDb:
 
     def read(self):
         try:
-            self.games = np.load(self.db_path)
-            logger.debug(f'Lichess Database {self.db_name} in folder {self.db_path} read, Shape: {self.games.shape}')
+            self.games = np.load(self.db_path, allow_pickle=True)
+            logger.debug(f'Lichess Database {self.db_path} read, Shape: {self.games.shape}')
             return self.games
         except FileNotFoundError:
-            logger.error(f'Lichess Database {self.db_name} in folder {self.b_path} not found')
+            logger.error(f'Lichess Database {self.db_path} not found')
         except Exception as err:
-            logger.error(f'Unknown Error {err=}, {type(err)=} reading {self.db_name} in folder {self.db_path}')
+            logger.error(f'Unknown Error {err=}, {type(err)=} reading {self.db_path}')
         raise Exception("Database not found")
+    
+    def game2positions(self, game_nr, pgn, engine, annotated):
+        logger.debug(f"Start Reading all Positions in game {game_nr}")
+        game = chess.pgn.read_game(io.StringIO(pgn))
+        boards = []
+        bitboards = []
+        evals = []
+        board = game.board()
+        half_moves = []
+        half_move = 1
+        for move in game.mainline_moves():
+            board.push(move)
+            boards.append(board)
+            half_moves.append(half_move)
+            if annotated:
+                engine.set_board(board)
+                bitboard, eval = engine.get_board_infos()
+                bitboards.append(bitboard)
+                evals.append(eval)
+            half_move += 1
+        if annotated:
+            data = {'HalfMove': half_moves, 'Board': boards, 'Bitboard': bitboards, 'Eval': evals}
+        else:
+            data = {'HalfMove': half_moves, 'Board': boards}
+        game_positions = pd.DataFrame(data)
+        game_positions["GameNr"] = game_nr
+        return game_positions
+
+    def read_all_positions(self, annotated = False):
+        logger.debug("Start Reading all Positions")
+        games = self.read()
+        engine = Stockfish(self.engine_path, 1.0)
+        board = engine.get_board()
+        try:
+            for game_nr, game in enumerate(games):
+                logger.debug(f"Processing Game: {game_nr}")
+                new_positions = self.game2positions(game_nr, game, engine, annotated)
+                if game_nr == 0:
+                    positions = new_positions
+                else:
+                    positions = pd.concat([positions, new_positions])
+        except Exception as err:
+            logger.error(f'Unknown Error {err=}, {type(err)=} reading all positions')
+            positions = []
+        engine.quit()
+        logger.debug(f"Position Head: \n{positions.head()}")
+        logger.debug(f"Position Tail: \n{positions.tail()}")
+        logger.debug(f"Position Shape: \n{positions.shape}")
+        logger.debug(f"Position Transition: \n{positions.T}")
+        return positions
 
     def get_elo_frompgn(self, pgn):
         white_elo = int(pgn.headers["WhiteElo"])
@@ -99,3 +151,20 @@ class NpyDb:
         pgn = uncompressed_data.decode('utf-8')
         self.create_from_pgnstr(pgn)
         logger.debug("Finished reading ZST File")
+
+    def read_position_db(self, position_folder, position_file):
+        position_path = os.path.join(position_folder, position_file)
+        try:
+            self.positions = np.load(position_path)
+            logger.debug(f'Position Database {position_path} read, Shape: {self.positions.shape}')
+            return self.positions
+        except FileNotFoundError:
+            logger.error(f'Position Database {position_path} not found')
+        except Exception as err:
+            logger.error(f'Unknown Error {err=}, {type(err)=} reading Position Database {position_path}')
+        raise Exception("Database not found")
+    
+    def write_position_db(self, positions, position_folder, position_file):
+        position_path = os.path.join(position_folder, position_file)
+        np.save(position_path, positions)
+        logger.debug("Database saved")
